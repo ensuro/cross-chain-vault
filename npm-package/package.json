@@ -1,0 +1,29 @@
+{
+  "name": "@ensuro/cross-chain-vault",
+  "description": "Contracts to enable cross-chain investment in ERC-4626 vaults, using Chainlink's CCIP",
+  "version": "%%VERSION%%",
+  "files": [
+    "**/*.sol",
+    "/build",
+    "/js/*.js"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:ensuro/cross-chain-vault.git"
+  },
+  "keywords": [
+    "solidity",
+    "ethereum",
+    "smart",
+    "contracts",
+    "decentralized",
+    "cross-chain",
+    "erc4626"
+  ],
+  "author": "Guillermo Narvaja <guillermo@ensuro.co>",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/ensuro/cross-chain-vault/issues"
+  },
+  "homepage": "https://github.com/ensuro/cross-chain-vault#readme"
+}
