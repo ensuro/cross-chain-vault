@@ -13,7 +13,7 @@ import {IAny2EVMMessageReceiver} from "@chainlink/contracts-ccip/contracts/inter
  * @title CrossChainVaultBase - Base contract for the two contracts that will implement the cross-chain investment
  * @dev Two contracts will inherit this one. The contracts only communicate through CCIP with each other.
  *
- *      Operates and everything is denominated in a single asset
+ *      Everything is denominated in a single asset.
  *
  * @custom:security-contact security@ensuro.co
  * @author Ensuro
@@ -25,6 +25,7 @@ abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceive
   IRouterClient public immutable ccipRouter;
   uint64 public immutable peerChain;
   address public immutable peerAddress;
+  uint8 public immutable vaultDecimals;
 
   enum MessageType {
     unknown,
@@ -58,7 +59,8 @@ abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceive
     IERC20Metadata feeToken_,
     uint64 peerChain_,
     address peerAddress_,
-    IERC20Metadata asset_
+    IERC20Metadata asset_,
+    uint8 vaultDecimals_
   ) {
     // TODO: validations
     ccipRouter = ccipRouter_;
@@ -66,6 +68,7 @@ abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceive
     feeToken = feeToken_;
     peerChain = peerChain_;
     peerAddress = peerAddress_;
+    vaultDecimals = vaultDecimals_;
     _disableInitializers();
   }
 
@@ -87,8 +90,12 @@ abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceive
   // solhint-disable-next-line func-name-mixedcase
   function __CrossChainVaultBase_init_unchained(uint256 defaultGasLimit_) internal onlyInitializing {
     defaultGasLimit = defaultGasLimit_;
-    // Infinite approval to the PolicyPool to pay the premiums
+    // Infinite approval to the ccipRouter to pay the fees
     feeToken.approve(address(ccipRouter), type(uint256).max);
+  }
+
+  function _oneShare() internal view returns (uint256) {
+    return 10 ** vaultDecimals;
   }
 
   // solhint-disable-next-line no-empty-blocks

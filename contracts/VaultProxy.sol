@@ -8,10 +8,9 @@ import {IRouterClient} from "@chainlink/contracts-ccip/contracts/interfaces/IRou
 import {CrossChainVaultBase} from "./CrossChainVaultBase.sol";
 
 /**
- * @title CrossChainVaultBase - Base contract for the two contracts that will implement the cross-chain investment
- * @dev Two contracts will inherit this one. The contracts only communicate through CCIP with each other.
- *
- *      Operates and everything is denominated in a single asset
+ * @title VaultProxy - Contract to deploy in the chain that has the source of funds
+ * @dev This contract will receive deposit requests from the user, sent the assets to the other chain where
+ *      they will be invested in a vault
  *
  * @custom:security-contact security@ensuro.co
  * @author Ensuro
@@ -29,7 +28,7 @@ contract VaultProxy is CrossChainVaultBase {
   mapping(bytes32 => PendingWithdrawal) internal _pendingWithdrawals;
   uint256 internal _totalPendingDeposits;
   uint256 internal _totalShares;
-  uint256 internal _assetsPerShare;
+  uint256 internal _assetsPerShare; // Amount of assets for one unit (10**vault.decimals()) of shares
   uint64 internal _updateBlockId;
 
   error InsufficientDeposit(uint256 amount);
@@ -42,6 +41,7 @@ contract VaultProxy is CrossChainVaultBase {
   event DepositConfirmed(bytes32 indexed messageId, uint256 assets, uint256 shares);
   event AssetsPerShareUpdated(uint64 indexed peerChainBlockId, uint256 assetsPerShare, uint256 totalShares);
   event WithdrawalRequested(bytes32 indexed messageId, uint256 assets, address target, bytes callback);
+  event WithdrawalExecuted(bytes32 indexed messageId, address indexed target, uint256 assets, uint256 shares);
 
   /// @custom:oz-upgrades-unsafe-allow constructor
   constructor(
@@ -49,19 +49,20 @@ contract VaultProxy is CrossChainVaultBase {
     IERC20Metadata feeToken_,
     uint64 peerChain_,
     address peerAddress_,
-    IERC20Metadata asset_
-  ) CrossChainVaultBase(ccipRouter_, feeToken_, peerChain_, peerAddress_, asset_) {}
+    IERC20Metadata asset_,
+    uint8 vaultDecimals_
+  ) CrossChainVaultBase(ccipRouter_, feeToken_, peerChain_, peerAddress_, asset_, vaultDecimals_) {}
 
   function _receiveMessage(
     MessageType msgType,
-    bytes32 messageId,
+    bytes32, // targetChain messageId is not relevant
     uint256 tokenAmount,
     bytes calldata extraData
   ) internal virtual override {
     if (msgType == MessageType.depositAck) {
-      _depositAck(messageId, extraData);
+      _depositAck(extraData);
     } else if (msgType == MessageType.withdrawalConfirmed) {
-      _withdrawalConfirmed(messageId, tokenAmount, extraData);
+      _withdrawalConfirmed(tokenAmount, extraData);
     } else if (msgType == MessageType.syncAssetsPerShare) {
       _syncAssetsPerShare(extraData);
     } else {
@@ -69,9 +70,12 @@ contract VaultProxy is CrossChainVaultBase {
     }
   }
 
-  function _depositAck(bytes32 messageId, bytes calldata extraData) internal {
+  function _depositAck(bytes calldata extraData) internal {
+    (bytes32 messageId, uint256 shares, uint256 assetsPerShare, uint64 updateBlockId) = abi.decode(
+      extraData,
+      (bytes32, uint256, uint256, uint64)
+    );
     require(_pendingDeposits[messageId] != 0, DepositNotPending(messageId));
-    (uint256 shares, uint256 assetsPerShare, uint64 updateBlockId) = abi.decode(extraData, (uint256, uint256, uint64));
     _updateAssetsPerShare(assetsPerShare, updateBlockId);
     _totalPendingDeposits -= _pendingDeposits[messageId];
     _totalShares += shares;
@@ -92,21 +96,25 @@ contract VaultProxy is CrossChainVaultBase {
     emit AssetsPerShareUpdated(updateBlockId, assetsPerShare, _totalShares);
   }
 
-  function _withdrawalConfirmed(bytes32 messageId, uint256 amount, bytes calldata extraData) internal {
+  function _withdrawalConfirmed(uint256 amount, bytes calldata extraData) internal {
+    (bytes32 messageId, uint256 shares, uint256 assetsPerShare, uint64 updateBlockId) = abi.decode(
+      extraData,
+      (bytes32, uint256, uint256, uint64)
+    );
     PendingWithdrawal storage withdrawal = _pendingWithdrawals[messageId];
     require(withdrawal.target != address(0), WithdrawalNotPending(messageId));
-    (uint256 shares, uint256 assetsPerShare, uint64 updateBlockId) = abi.decode(extraData, (uint256, uint256, uint64));
     _updateAssetsPerShare(assetsPerShare, updateBlockId);
     _totalShares -= shares;
     asset.safeTransfer(withdrawal.target, amount);
     if (withdrawal.callback.length != 0) {
       withdrawal.target.functionCall(withdrawal.callback);
     }
+    emit WithdrawalExecuted(messageId, withdrawal.target, amount, shares);
   }
 
   function deposit(uint256 amount) external {
     require(amount != 0, InsufficientDeposit(amount)); // TODO: it might be good to add a minimum
-    asset.transferFrom(msg.sender, address(this), amount);
+    asset.safeTransferFrom(msg.sender, address(this), amount);
     bytes32 messageId = _sendMessage(MessageType.deposit, amount, bytes(""));
     _totalPendingDeposits += amount;
     _pendingDeposits[messageId] = amount;
@@ -122,6 +130,6 @@ contract VaultProxy is CrossChainVaultBase {
   }
 
   function totalAssets() public view returns (uint256 assets) {
-    return _totalPendingDeposits + _totalShares * _assetsPerShare;
+    return _totalPendingDeposits + (_totalShares * _assetsPerShare) / _oneShare();
   }
 }
