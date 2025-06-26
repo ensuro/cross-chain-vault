@@ -2,16 +2,8 @@
 pragma solidity ^0.8.16;
 
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
-import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import {IERC165} from "@openzeppelin/contracts/interfaces/IERC165.sol";
-import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
-// import {Packing} from "@openzeppelin/contracts/utils/Packing.sol";
-// import {Address} from "@openzeppelin/contracts/utils/Address.sol";
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import {AccessManagedProxy} from "./dependencies/AccessManagedProxy.sol";
 
 import {Client} from "@chainlink/contracts-ccip/contracts/libraries/Client.sol";
 import {IRouterClient} from "@chainlink/contracts-ccip/contracts/interfaces/IRouterClient.sol";
@@ -34,11 +26,6 @@ abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceive
   uint64 public immutable peerChain;
   address public immutable peerAddress;
 
-  error OnlyRouter(address sender);
-  error InvalidMessageSender(address ccipMsgSender);
-  error InvalidSourceChain(uint64 sourceChainSelector);
-  error InvalidTokensReceived();
-
   enum MessageType {
     unknown,
     deposit, // Sent from source to destination - with assets
@@ -47,6 +34,17 @@ abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceive
     withdrawalConfirmed, // Sent from destination to source - with assets
     syncAssetsPerShare // Sent from destination to source - No assets
   }
+
+  uint256 public defaultGasLimit;
+  mapping(MessageType => uint256) public gasLimits;
+
+  error OnlyRouter(address sender);
+  error InvalidMessageSender(address ccipMsgSender);
+  error InvalidSourceChain(uint64 sourceChainSelector);
+  error InvalidTokensReceived();
+  error InvalidMessageType(MessageType msgType);
+
+  event MessageSent(bytes32 indexed messageId, MessageType msgType, uint256 assetsSent, bytes extraData);
 
   /// @dev only calls from the set router are accepted.
   modifier onlyRouter() {
@@ -71,8 +69,33 @@ abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceive
     _disableInitializers();
   }
 
+  /**
+   * @dev Initializes the contract
+   *
+   * @param defaultGasLimit_ Default gas limit for messages, later can be customized by message type
+   */
+  function initialize(uint256 defaultGasLimit_) public virtual initializer {
+    __CrossChainVaultBase_init(defaultGasLimit_);
+  }
+
+  // solhint-disable-next-line func-name-mixedcase
+  function __CrossChainVaultBase_init(uint256 defaultGasLimit_) internal onlyInitializing {
+    __UUPSUpgradeable_init();
+    __CrossChainVaultBase_init_unchained(defaultGasLimit_);
+  }
+
+  // solhint-disable-next-line func-name-mixedcase
+  function __CrossChainVaultBase_init_unchained(uint256 defaultGasLimit_) internal onlyInitializing {
+    defaultGasLimit = defaultGasLimit_;
+    // Infinite approval to the PolicyPool to pay the premiums
+    feeToken.approve(address(ccipRouter), type(uint256).max);
+  }
+
   // solhint-disable-next-line no-empty-blocks
-  function _authorizeUpgrade(address newImpl) internal view override {}
+  function _authorizeUpgrade(address newImpl) internal view override {
+    // This method doesn't have any access control validation because these contracts are suppossed to be
+    // deployed behind and AccessManagedProxy that controls the access to all the external methods
+  }
 
   function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
     return interfaceId == type(IAny2EVMMessageReceiver).interfaceId || interfaceId == type(IERC165).interfaceId;
@@ -103,4 +126,37 @@ abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceive
     uint256 tokenAmount,
     bytes calldata data
   ) internal virtual;
+
+  function getGasLimit(MessageType msgType) public view returns (uint256 theGasLimit) {
+    theGasLimit = gasLimits[msgType];
+    if (theGasLimit == 0) return defaultGasLimit;
+  }
+
+  function getExtraArgs(MessageType msgType) public view returns (bytes memory extraArgs) {
+    return abi.encode(Client.GenericExtraArgsV2({gasLimit: getGasLimit(msgType), allowOutOfOrderExecution: false}));
+  }
+
+  function _sendMessage(
+    MessageType msgType,
+    uint256 assetToSend,
+    bytes memory extraData
+  ) internal returns (bytes32 messageId) {
+    Client.EVMTokenAmount[] memory tokenAmounts;
+    if (assetToSend != 0) {
+      asset.approve(address(ccipRouter), assetToSend);
+      tokenAmounts = new Client.EVMTokenAmount[](1);
+      tokenAmounts[0].token = address(asset);
+      tokenAmounts[0].amount = assetToSend;
+    }
+    Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
+      receiver: abi.encode(peerAddress),
+      data: abi.encodePacked(msgType, extraData),
+      tokenAmounts: tokenAmounts,
+      extraArgs: getExtraArgs(msgType),
+      feeToken: address(feeToken)
+    });
+    // address(this) must have sufficient feeToken or the send will revert.
+    messageId = ccipRouter.ccipSend(peerChain, message);
+    emit MessageSent(messageId, msgType, assetToSend, extraData);
+  }
 }
