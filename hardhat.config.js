@@ -1,8 +1,6 @@
-require("@openzeppelin/hardhat-upgrades");
 require("hardhat-dependency-compiler");
 require("hardhat-contract-sizer");
 require("@nomicfoundation/hardhat-toolbox");
-require("hardhat-exposed");
 
 const hretry = require("@ensuro/utils/js/hardhat-retry");
 
@@ -20,13 +18,6 @@ module.exports = {
       evmVersion: "cancun",
     },
   },
-  networks: {
-    hardhat: {
-      // Adding this setting just to unlock error when using hardhat-exposed for tests.
-      // But anyway, in Polygon the limit is 32KB, not 24KB - https://governance.polygon.technology/proposals/PIP-30/
-      allowUnlimitedContractSize: true,
-    },
-  },
   contractSizer: {
     alphaSort: true,
     runOnCompile: false,
@@ -38,8 +29,5 @@ module.exports = {
       "@ensuro/utils/contracts/TestERC4626.sol",
       "@openzeppelin/contracts/access/manager/AccessManager.sol",
     ],
-  },
-  exposed: {
-    include: ["contracts/*.sol"],
   },
 };
