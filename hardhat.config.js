@@ -1,4 +1,5 @@
 require("hardhat-dependency-compiler");
+require("@openzeppelin/hardhat-upgrades");
 require("hardhat-contract-sizer");
 require("@nomicfoundation/hardhat-toolbox");
 
@@ -16,6 +17,11 @@ module.exports = {
         runs: 200,
       },
       evmVersion: "cancun",
+    },
+  },
+  networks: {
+    hardhat: {
+      initialBaseFeePerGas: 0,
     },
   },
   contractSizer: {
