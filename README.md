@@ -9,6 +9,9 @@ It's composed of two contracts, one (**ProxyVault**) deployed in the _source cha
 
 These contracts are intended to be used by a single user. In the source chain there's always an accurate enough estimation of the total assets of the investment.
 
+![cross-chain-vault](https://github.com/user-attachments/assets/fbd1ce03-f8d0-425a-beee-19c2ff724d9c)
+
+
 ### Deposits ### 
 
 Deposits are sent to the other chain and immediatelly reflected in the `totalAssets()` method.
