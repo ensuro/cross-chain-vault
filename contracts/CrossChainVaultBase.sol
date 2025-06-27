@@ -21,10 +21,15 @@ import {IAny2EVMMessageReceiver} from "@chainlink/contracts-ccip/contracts/inter
 abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceiver, IERC165 {
   /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
   IERC20Metadata public immutable asset;
+  /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
   IERC20Metadata public immutable feeToken;
+  /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
   IRouterClient public immutable ccipRouter;
+  /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
   uint64 public immutable peerChain;
+  /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
   address public immutable peerAddress;
+  /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
   uint8 public immutable vaultDecimals;
 
   enum MessageType {
@@ -140,7 +145,8 @@ abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceive
   }
 
   function getExtraArgs(MessageType msgType) public view returns (bytes memory extraArgs) {
-    return abi.encode(Client.GenericExtraArgsV2({gasLimit: getGasLimit(msgType), allowOutOfOrderExecution: false}));
+    return
+      Client._argsToBytes(Client.GenericExtraArgsV2({gasLimit: getGasLimit(msgType), allowOutOfOrderExecution: false}));
   }
 
   function _sendMessage(

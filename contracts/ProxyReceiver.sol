@@ -20,10 +20,12 @@ contract ProxyReceiver is CrossChainVaultBase {
   using SafeERC20 for IERC20Metadata;
   using Address for address;
 
+  /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
   IERC4626 public immutable vault;
 
   event DepositConfirmed(bytes32 indexed messageId, uint256 assets, uint256 shares);
   event WithdrawalExecuted(bytes32 indexed messageId, uint256 requestedAmount, uint256 assets, uint256 shares);
+  event AssetsPerShareSynced(uint256 assetsPerShare);
 
   /// @custom:oz-upgrades-unsafe-allow constructor
   constructor(
@@ -86,8 +88,7 @@ contract ProxyReceiver is CrossChainVaultBase {
 
   function _deposit(bytes32 messageId, uint256 amount) internal {
     uint256 shares = vault.deposit(amount, address(this));
-    uint256 assestPerShare = vault.convertToAssets(_oneShare());
-    _sendMessage(MessageType.depositAck, 0, abi.encode(messageId, shares, assestPerShare, uint64(block.number)));
+    _sendMessage(MessageType.depositAck, 0, abi.encode(messageId, shares, assetsPerShare(), uint64(block.number)));
     emit DepositConfirmed(messageId, amount, shares);
   }
 
@@ -97,12 +98,21 @@ contract ProxyReceiver is CrossChainVaultBase {
     if (requestedAmount < amount) amount = requestedAmount;
 
     uint256 shares = vault.withdraw(amount, address(this), address(this));
-    uint256 assestPerShare = vault.convertToAssets(_oneShare());
     _sendMessage(
       MessageType.withdrawalConfirmed,
       amount,
-      abi.encode(messageId, shares, assestPerShare, uint64(block.number))
+      abi.encode(messageId, shares, assetsPerShare(), uint64(block.number))
     );
     emit WithdrawalExecuted(messageId, requestedAmount, amount, shares);
+  }
+
+  function assetsPerShare() public view returns (uint256) {
+    return vault.convertToAssets(_oneShare());
+  }
+
+  function syncAssetsPerShare() external {
+    uint256 axs = assetsPerShare();
+    _sendMessage(MessageType.syncAssetsPerShare, 0, abi.encode(axs, uint64(block.number)));
+    emit AssetsPerShareSynced(axs);
   }
 }

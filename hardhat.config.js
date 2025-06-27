@@ -39,4 +39,7 @@ module.exports = {
       "@openzeppelin/contracts/access/manager/AccessManager.sol",
     ],
   },
+  exposed: {
+    include: ["contracts/*.sol"],
+  },
 };

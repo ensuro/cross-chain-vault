@@ -26,10 +26,10 @@ contract VaultProxy is CrossChainVaultBase {
 
   mapping(bytes32 => uint256) internal _pendingDeposits;
   mapping(bytes32 => PendingWithdrawal) internal _pendingWithdrawals;
-  uint256 internal _totalPendingDeposits;
-  uint256 internal _totalShares;
-  uint256 internal _assetsPerShare; // Amount of assets for one unit (10**vault.decimals()) of shares
-  uint64 internal _updateBlockId;
+  uint256 public totalPendingDeposits;
+  uint256 public totalShares;
+  uint256 public assetsPerShare; // Amount of assets for one unit (10**vault.decimals()) of shares
+  uint64 public updateBlockId;
 
   error InsufficientDeposit(uint256 amount);
   error InsufficientWithdrawal(uint256 amount);
@@ -71,40 +71,40 @@ contract VaultProxy is CrossChainVaultBase {
   }
 
   function _depositAck(bytes calldata extraData) internal {
-    (bytes32 messageId, uint256 shares, uint256 assetsPerShare, uint64 updateBlockId) = abi.decode(
+    (bytes32 messageId, uint256 shares, uint256 axs, uint64 msgBlockId) = abi.decode(
       extraData,
       (bytes32, uint256, uint256, uint64)
     );
     require(_pendingDeposits[messageId] != 0, DepositNotPending(messageId));
-    _updateAssetsPerShare(assetsPerShare, updateBlockId);
-    _totalPendingDeposits -= _pendingDeposits[messageId];
-    _totalShares += shares;
+    _updateAssetsPerShare(axs, msgBlockId);
+    totalPendingDeposits -= _pendingDeposits[messageId];
+    totalShares += shares;
     emit DepositConfirmed(messageId, _pendingDeposits[messageId], shares);
     _pendingDeposits[messageId] = 0;
   }
 
   function _syncAssetsPerShare(bytes calldata extraData) internal {
-    (uint256 assetsPerShare, uint64 updateBlockId) = abi.decode(extraData, (uint256, uint64));
-    _updateAssetsPerShare(assetsPerShare, updateBlockId);
+    (uint256 axs, uint64 msgBlockId) = abi.decode(extraData, (uint256, uint64));
+    _updateAssetsPerShare(axs, msgBlockId);
   }
 
-  function _updateAssetsPerShare(uint256 assetsPerShare, uint64 updateBlockId) internal {
-    // Since I assume we receive the messages in order, then I update _assetsPerShare and _updateBlockId on
+  function _updateAssetsPerShare(uint256 axs, uint64 msgBlockId) internal {
+    // Since I assume we receive the messages in order, then I update assetsPerShare and updateBlockId on
     // every message received, without checking if the information is more updated than the one I had
-    _assetsPerShare = assetsPerShare;
-    _updateBlockId = updateBlockId;
-    emit AssetsPerShareUpdated(updateBlockId, assetsPerShare, _totalShares);
+    assetsPerShare = axs;
+    updateBlockId = msgBlockId;
+    emit AssetsPerShareUpdated(msgBlockId, axs, totalShares);
   }
 
   function _withdrawalConfirmed(uint256 amount, bytes calldata extraData) internal {
-    (bytes32 messageId, uint256 shares, uint256 assetsPerShare, uint64 updateBlockId) = abi.decode(
+    (bytes32 messageId, uint256 shares, uint256 axs, uint64 msgBlockId) = abi.decode(
       extraData,
       (bytes32, uint256, uint256, uint64)
     );
     PendingWithdrawal storage withdrawal = _pendingWithdrawals[messageId];
     require(withdrawal.target != address(0), WithdrawalNotPending(messageId));
-    _updateAssetsPerShare(assetsPerShare, updateBlockId);
-    _totalShares -= shares;
+    _updateAssetsPerShare(axs, msgBlockId);
+    totalShares -= shares;
     asset.safeTransfer(withdrawal.target, amount);
     if (withdrawal.callback.length != 0) {
       withdrawal.target.functionCall(withdrawal.callback);
@@ -116,7 +116,7 @@ contract VaultProxy is CrossChainVaultBase {
     require(amount != 0, InsufficientDeposit(amount)); // TODO: it might be good to add a minimum
     asset.safeTransferFrom(msg.sender, address(this), amount);
     bytes32 messageId = _sendMessage(MessageType.deposit, amount, bytes(""));
-    _totalPendingDeposits += amount;
+    totalPendingDeposits += amount;
     _pendingDeposits[messageId] = amount;
   }
 
@@ -130,6 +130,6 @@ contract VaultProxy is CrossChainVaultBase {
   }
 
   function totalAssets() public view returns (uint256 assets) {
-    return _totalPendingDeposits + (_totalShares * _assetsPerShare) / _oneShare();
+    return totalPendingDeposits + (totalShares * assetsPerShare) / _oneShare();
   }
 }
