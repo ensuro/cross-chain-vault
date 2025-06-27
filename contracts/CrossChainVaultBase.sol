@@ -2,6 +2,7 @@
 pragma solidity ^0.8.16;
 
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC165} from "@openzeppelin/contracts/interfaces/IERC165.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
@@ -19,6 +20,8 @@ import {IAny2EVMMessageReceiver} from "@chainlink/contracts-ccip/contracts/inter
  * @author Ensuro
  */
 abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceiver, IERC165 {
+  using SafeERC20 for IERC20Metadata;
+
   /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
   IERC20Metadata public immutable asset;
   /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
@@ -49,8 +52,12 @@ abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceive
   error InvalidSourceChain(uint64 sourceChainSelector);
   error InvalidTokensReceived();
   error InvalidMessageType(MessageType msgType);
+  // Error copied from AccessManagedProxy - It's not raised explicity, but by the proxy
+  error AccessManagedUnauthorized(address caller);
 
   event MessageSent(bytes32 indexed messageId, MessageType msgType, uint256 assetsSent, bytes extraData);
+  event GasLimitChanged(MessageType indexed msgType, uint256 oldValue, uint256 newValue);
+  event FeeTokenWithdrawal(address indexed withdrawTo, uint256 amount);
 
   /// @dev only calls from the set router are accepted.
   modifier onlyRouter() {
@@ -142,6 +149,17 @@ abstract contract CrossChainVaultBase is UUPSUpgradeable, IAny2EVMMessageReceive
   function getGasLimit(MessageType msgType) public view returns (uint256 theGasLimit) {
     theGasLimit = gasLimits[msgType];
     if (theGasLimit == 0) return defaultGasLimit;
+  }
+
+  function setGasLimit(MessageType msgType, uint256 newGasLimit) external {
+    emit GasLimitChanged(msgType, getGasLimit(msgType), newGasLimit);
+    gasLimits[msgType] = newGasLimit;
+  }
+
+  function withdrawFeeToken(uint256 amount, address withdrawTo) external {
+    if (amount == type(uint256).max) amount = feeToken.balanceOf(address(this));
+    feeToken.safeTransfer(withdrawTo, amount);
+    emit FeeTokenWithdrawal(withdrawTo, amount);
   }
 
   function getExtraArgs(MessageType msgType) public view returns (bytes memory extraArgs) {

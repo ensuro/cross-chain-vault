@@ -51,7 +51,7 @@ const MessageType = {
 };
 
 async function setUp() {
-  const [deployer, admin, lp, lp2, anon, guardian] = await ethers.getSigners();
+  const [deployer, admin, lp, lp2, anon, syncer, bridgeAdmin] = await ethers.getSigners();
 
   const asset = await initCurrency(
     { name: "Test USDC", symbol: "USDC", decimals: 6, initial_supply: _A(50000), extraArgs: [admin] },
@@ -79,14 +79,19 @@ async function setUp() {
   // CCIP MockRouter
   const MockRouter = await ethers.getContractFactory("AsyncMockRouter");
   const router = await MockRouter.deploy();
+  await router.setFee(_W(1));
 
-  const link = await initCurrency({
-    name: "The fee token",
-    symbol: "LINK",
-    decimals: 18,
-    initial_supply: _W(1000),
-    extraArgs: [admin],
-  });
+  const link = await initCurrency(
+    {
+      name: "The fee token",
+      symbol: "LINK",
+      decimals: 18,
+      initial_supply: _W(1000),
+      extraArgs: [admin],
+    },
+    [admin],
+    [_W(1000)]
+  );
 
   const VaultProxy = await ethers.getContractFactory("VaultProxy");
   const ProxyReceiver = await ethers.getContractFactory("ProxyReceiver");
@@ -129,29 +134,36 @@ async function setUp() {
     deployFunction: async (hre_, opts, factory, ...args) => ozUpgradesDeploy(hre_, opts, factory, ...args, acMgr),
   });
 
+  // Fund LINK tokens for both contracts
+  await link.connect(admin).transfer(vp, _W(100));
+  await link.connect(admin).transfer(pr, _W(100));
+
   // Permission setup for both contracts
 
-  const roles = {
-    LP_ROLE: getAccessManagerRole("LP_ROLE"),
-    CCIP_ROUTER_ROLE: getAccessManagerRole("CCIP_ROUTER_ROLE"),
-    SYNC_AXS_ROLE: getAccessManagerRole("SYNC_AXS_ROLE"),
-  };
+  const roles = Object.fromEntries(
+    ["LP_ROLE", "CCIP_ROUTER_ROLE", "SYNC_AXS_ROLE", "BRIDGE_ADMIN_ROLE"].map((roleName) => [
+      roleName,
+      getAccessManagerRole(roleName),
+    ])
+  );
 
   await makeAllViewsPublic(acMgr.connect(admin), vp);
   await setupAMRole(acMgr.connect(admin), vp, roles, "LP_ROLE", ["scheduleWithdrawal", "deposit"]);
   await acMgr.connect(admin).grantRole(roles.LP_ROLE, lp, 0);
-  await acMgr.connect(admin).grantRole(roles.LP_ROLE, lp2, 0);
 
   await setupAMRole(acMgr.connect(admin), vp, roles, "CCIP_ROUTER_ROLE", ["ccipReceive"]);
   await acMgr.connect(admin).grantRole(roles.CCIP_ROUTER_ROLE, router, 0);
 
-  await makeAllViewsPublic(acMgr.connect(admin), pr);
+  await setupAMRole(acMgr.connect(admin), vp, roles, "BRIDGE_ADMIN_ROLE", ["setGasLimit", "withdrawFeeToken"]);
 
+  await makeAllViewsPublic(acMgr.connect(admin), pr);
   await setupAMRole(acMgr.connect(admin), pr, roles, "CCIP_ROUTER_ROLE", ["ccipReceive"]);
-  await acMgr.connect(admin).grantRole(roles.CCIP_ROUTER_ROLE, router, 0);
 
   await setupAMRole(acMgr.connect(admin), pr, roles, "SYNC_AXS_ROLE", ["syncAssetsPerShare"]);
-  await acMgr.connect(admin).grantRole(roles.SYNC_AXS_ROLE, guardian, 0);
+  await acMgr.connect(admin).grantRole(roles.SYNC_AXS_ROLE, syncer, 0);
+
+  await setupAMRole(acMgr.connect(admin), pr, roles, "BRIDGE_ADMIN_ROLE", ["setGasLimit", "withdrawFeeToken"]);
+  await acMgr.connect(admin).grantRole(roles.BRIDGE_ADMIN_ROLE, bridgeAdmin, 0);
 
   return {
     asset,
@@ -163,7 +175,8 @@ async function setUp() {
     lp,
     lp2,
     anon,
-    guardian,
+    syncer,
+    bridgeAdmin,
     VaultProxy,
     ProxyReceiver,
     router,
@@ -181,17 +194,50 @@ describe("Cross-chain vault contract tests", function () {
     expect(await vp.totalAssets()).to.equal(0);
   });
 
+  it("It can change the gasLimits", async () => {
+    const { vp, bridgeAdmin, anon } = await helpers.loadFixture(setUp);
+
+    // This is just to show how the AccessManagedProxy works, even when in the code you won't
+    // see the access control, it's there...
+    await expect(vp.connect(anon).setGasLimit(MessageType.deposit, 1234n)).to.be.revertedWithCustomError(
+      vp,
+      "AccessManagedUnauthorized"
+    );
+
+    expect(await vp.getGasLimit(MessageType.deposit)).to.equal(DEFAULT_GAS_LIMIT);
+    await expect(vp.connect(bridgeAdmin).setGasLimit(MessageType.deposit, 1234n))
+      .to.emit(vp, "GasLimitChanged")
+      .withArgs(MessageType.deposit, DEFAULT_GAS_LIMIT, 1234n);
+    expect(await vp.getGasLimit(MessageType.deposit)).to.equal(1234n);
+  });
+
+  it("It can recover the fee tokens sent to the contracts", async () => {
+    const { pr, bridgeAdmin, link, lp } = await helpers.loadFixture(setUp);
+
+    expect(await link.balanceOf(pr)).to.equal(_W(100));
+
+    await expect(pr.connect(bridgeAdmin).withdrawFeeToken(_W(10), lp))
+      .to.emit(pr, "FeeTokenWithdrawal")
+      .withArgs(lp, _W(10));
+    expect(await link.balanceOf(pr)).to.equal(_W(90));
+    expect(await link.balanceOf(lp)).to.equal(_W(10));
+
+    await expect(pr.connect(bridgeAdmin).withdrawFeeToken(MaxUint256, lp))
+      .to.emit(pr, "FeeTokenWithdrawal")
+      .withArgs(lp, _W(90));
+    expect(await link.balanceOf(pr)).to.equal(_W(0));
+    expect(await link.balanceOf(lp)).to.equal(_W(100));
+  });
+
   it("It can synchronize the assets per share", async () => {
-    const { vp, pr, guardian, router } = await helpers.loadFixture(setUp);
+    const { vp, pr, syncer, router } = await helpers.loadFixture(setUp);
     const assetsPerShare = await pr.assetsPerShare();
     expect(assetsPerShare).to.equal(_A("1.25") - 1n); // 1n rounding difference
     expect(await vp.assetsPerShare()).to.equal(0);
     expect(await vp.updateBlockId()).to.equal(0);
 
     const blockNumber = 1 + (await ethers.provider.getBlockNumber());
-    await expect(pr.connect(guardian).syncAssetsPerShare())
-      .to.emit(pr, "AssetsPerShareSynced")
-      .withArgs(assetsPerShare);
+    await expect(pr.connect(syncer).syncAssetsPerShare()).to.emit(pr, "AssetsPerShareSynced").withArgs(assetsPerShare);
 
     // Message hasn't arrived yet
     expect(await vp.assetsPerShare()).to.equal(0);
@@ -206,7 +252,7 @@ describe("Cross-chain vault contract tests", function () {
   });
 
   it("It can do a cross-chain deposit", async () => {
-    const { vp, pr, theVault, lp, asset, router } = await helpers.loadFixture(setUp);
+    const { vp, pr, theVault, lp, asset, router, syncer } = await helpers.loadFixture(setUp);
 
     await asset.connect(lp).approve(vp, MaxUint256);
 
@@ -221,7 +267,7 @@ describe("Cross-chain vault contract tests", function () {
     expect(await theVault.balanceOf(pr)).to.equal(0);
     expect(await asset.balanceOf(router)).to.equal(_A(100)); // The funds are in the router
 
-    const blockNumber = 1 + (await ethers.provider.getBlockNumber());
+    let blockNumber = 1 + (await ethers.provider.getBlockNumber());
     // Dispatch message and the message arrives and the money is invested in the vault
     await expect(router.dispatchMessage(MaxUint256))
       .to.emit(pr, "DepositConfirmed")
@@ -249,5 +295,92 @@ describe("Cross-chain vault contract tests", function () {
     expect(await vp.totalShares()).to.equal(_A(100 / 1.25));
     expect(await vp.assetsPerShare()).to.equal(_A(1.25) - 1n);
     expect(await vp.updateBlockId()).to.equal(blockNumber);
+
+    // Earnings in the vault are reflected (after sync) in vp total assets
+    await theVault.discreteEarning(_A(500));
+
+    blockNumber = 1 + (await ethers.provider.getBlockNumber());
+    await pr.connect(syncer).syncAssetsPerShare();
+    await expect(router.dispatchMessage(MaxUint256))
+      .to.emit(vp, "AssetsPerShareUpdated")
+      .withArgs(blockNumber, captureAny.value, _A(100 / 1.25));
+    expect(await theVault.convertToAssets(_A(1))).to.equal(captureAny.lastValue);
+    expect(await vp.assetsPerShare()).to.equal(captureAny.lastValue);
+    expect(await vp.updateBlockId()).to.equal(blockNumber);
+    // Total assets increased
+    expect(await vp.totalAssets()).to.closeTo(_A(137), _A("1"));
+  });
+
+  it("It can do a cross-chain withdrawal", async () => {
+    const { vp, pr, theVault, lp, asset, router } = await helpers.loadFixture(setUp);
+
+    await asset.connect(lp).approve(vp, MaxUint256);
+
+    await vp.connect(lp).deposit(_A(100));
+    await router.dispatchMessage(MaxUint256);
+    await router.dispatchMessage(MaxUint256);
+
+    expect(await vp.totalAssets()).to.closeTo(_A(100), _A("0.0001"));
+    expect(await vp.totalShares()).to.equal(_A(100 / 1.25));
+    expect(await vp.assetsPerShare()).to.equal(_A(1.25) - 1n);
+
+    // The vault has losses, assets per share go down. But it will be updated after the request
+    await theVault.discreteEarning(-_A(54));
+    expect(await pr.assetsPerShare()).to.closeTo(_A("1.2"), 10n);
+
+    await expect(vp.connect(lp).scheduleWithdrawal(_A(20), lp, ethers.toUtf8Bytes("")))
+      .to.emit(vp, "WithdrawalRequested")
+      .withArgs(captureAny.value, _A(20), lp, ethers.toUtf8Bytes(""))
+      .to.emit(vp, "MessageSent")
+      .withArgs(anyValue, MessageType.withdrawalRequest, _A(0), anyValue);
+    const messageId = captureAny.lastValue;
+
+    let blockNumber = 1 + (await ethers.provider.getBlockNumber());
+    // Dispatch message and the withdrawal is executed (on dest-chain side)
+    await expect(router.dispatchMessage(MaxUint256))
+      .to.emit(pr, "WithdrawalExecuted")
+      .withArgs(messageId, _A(20), _A(20), captureAny.uint)
+      .to.emit(pr, "MessageSent")
+      .withArgs(anyValue, MessageType.withdrawalConfirmed, _A(20), anyValue);
+    expect(captureAny.lastUint).to.closeTo(_A(20 / 1.2), 10n);
+
+    // Still hasn't received the assets nor the update in shares
+    expect(await vp.totalAssets()).to.closeTo(_A(100), _A("0.0001"));
+
+    expect(await asset.balanceOf(lp)).to.equal(_A(INITIAL - 100));
+    // Dispatch message and the withdrawal is executed (on source-chain side)
+    await expect(router.dispatchMessage(MaxUint256))
+      .to.emit(vp, "WithdrawalExecuted")
+      .withArgs(messageId, lp, _A(20), captureAny.uint);
+    expect(captureAny.lastUint).to.closeTo(_A(20 / 1.2), 10n);
+    expect(await asset.balanceOf(lp)).to.equal(_A(INITIAL - 80));
+
+    // Now totalAssets reflects the 20 of withdrawal and the 4 in negative yields
+    expect(await vp.totalAssets()).to.closeTo(_A(100 - 20 - 4), _A("0.0001"));
+    expect(await vp.assetsPerShare()).to.closeTo(_A(1.2), 10n);
+    expect(await vp.updateBlockId()).to.equal(blockNumber);
+
+    // Now I withdraw all the remaining assets
+    await expect(vp.connect(lp).scheduleWithdrawal(MaxUint256, lp, ethers.toUtf8Bytes("")))
+      .to.emit(vp, "WithdrawalRequested")
+      .withArgs(captureAny.value, MaxUint256, lp, ethers.toUtf8Bytes(""));
+
+    blockNumber = 1 + (await ethers.provider.getBlockNumber());
+    // Dispatch message and the withdrawal is executed (source chain side)
+    await expect(router.dispatchMessage(MaxUint256))
+      .to.emit(pr, "WithdrawalExecuted")
+      .withArgs(anyValue, MaxUint256, captureAny.uint, anyValue);
+    expect(captureAny.lastUint).to.closeTo(_A(100 - 20 - 4), 10n);
+    expect(await theVault.balanceOf(pr)).to.equal(0); // All funds deinvested
+
+    // Dispatch message and the withdrawal is executed (on source-chain side)
+    await expect(router.dispatchMessage(MaxUint256))
+      .to.emit(vp, "WithdrawalExecuted")
+      .withArgs(anyValue, lp, captureAny.value, await vp.totalShares());
+    expect(captureAny.lastUint).to.closeTo(_A(100 - 20 - 4), 10n); // Assets received
+    expect(await vp.totalAssets()).to.equal(0);
+    expect(await vp.totalShares()).to.equal(0);
+    // LP recovers the money, except for losses
+    expect(await asset.balanceOf(lp)).to.closeTo(_A(INITIAL - 4), 10n);
   });
 });
